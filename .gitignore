@@ -43,3 +43,9 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+#ignore private.txt
+private.txt
+
+#ignore .git.bfg-report folder
+.git.bfg-report/
