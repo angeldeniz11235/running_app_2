@@ -1,125 +1,432 @@
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:async';
 
 void main() {
-  runApp(const MyApp());
+  Geolocator.requestPermission();
+  runApp(const RunTrackerApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class RunTrackerApp extends StatelessWidget {
+  const RunTrackerApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Run Tracker',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        primarySwatch: Colors.blue,
         useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const RunTrackerHome(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class RunTrackerHome extends StatefulWidget {
+  const RunTrackerHome({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<RunTrackerHome> createState() => _RunTrackerHomeState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _RunTrackerHomeState extends State<RunTrackerHome> {
+  bool isRunning = false;
+  bool isPaused = false;
+  bool autoStopEnabled = false;
+  List<LatLng> routePoints = [];
+  DateTime? startTime;
+  Timer? timer;
+  double distance = 0;
+  Duration elapsed = Duration.zero;
+  LatLng? startPosition;
+  StreamSubscription<Position>? positionStream;
+  bool useMetric = true;
+  static const double kmToMilesConversion = 0.621371;
 
-  void _incrementCounter() {
+  @override
+  void initState() {
+    super.initState();
+    _requestLocationPermission();
+    _loadPreferences();
+    _initializeUnitPreference();
+  }
+
+  Future<void> _initializeUnitPreference() async {
+    // Get the current locale
+    final locale = WidgetsBinding.instance.window.locale.countryCode;
+    // Default to metric unless in US
+    final defaultToMetric = locale != 'US';
+
+    final prefs = await SharedPreferences.getInstance();
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      useMetric = prefs.getBool('useMetric') ?? defaultToMetric;
+    });
+  }
+
+  Future<void> _saveUnitPreference() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('useMetric', useMetric);
+  }
+
+  String formatDistance(double distanceInMeters) {
+    final distanceInKm = distanceInMeters / 1000;
+    if (useMetric) {
+      return '${distanceInKm.toStringAsFixed(2)} km';
+    } else {
+      final distanceInMiles = distanceInKm * kmToMilesConversion;
+      return '${distanceInMiles.toStringAsFixed(2)} mi';
+    }
+  }
+
+  Future<void> _loadPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      autoStopEnabled = prefs.getBool('autoStopEnabled') ?? false;
+    });
+  }
+
+  Future<void> _savePreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('autoStopEnabled', autoStopEnabled);
+  }
+
+  Future<void> _requestLocationPermission() async {
+    final permission = await Geolocator.requestPermission();
+    if (permission == LocationPermission.denied) {
+      // Handle denied permission
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Location permission is required')),
+      );
+    }
+  }
+
+  void startRun() async {
+    // Start timer immediately
+    setState(() {
+      isRunning = true;
+      startTime = DateTime.now();
+      distance = 0;
+      routePoints = [];
+    });
+
+    timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!isPaused) {
+        setState(() {
+          elapsed = DateTime.now().difference(startTime!);
+        });
+      }
+    });
+
+    // Get GPS position in parallel
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 5),
+      );
+
+      setState(() {
+        startPosition = LatLng(position.latitude, position.longitude);
+        routePoints = [startPosition!];
+      });
+
+      // Start position stream after getting initial position
+      positionStream = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          distanceFilter: 10,
+        ),
+      ).listen((Position position) {
+        final newPoint = LatLng(position.latitude, position.longitude);
+
+        if (routePoints.isNotEmpty) {
+          final lastPoint = routePoints.last;
+          distance += Geolocator.distanceBetween(
+            lastPoint.latitude,
+            lastPoint.longitude,
+            newPoint.latitude,
+            newPoint.longitude,
+          );
+        }
+
+        setState(() {
+          routePoints.add(newPoint);
+        });
+
+        if (autoStopEnabled &&
+            elapsed.inMinutes >= 1 &&
+            startPosition != null &&
+            _isNearStartPosition(position)) {
+          stopRun();
+        }
+      });
+    } catch (e) {
+      // Handle GPS acquisition error
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text(
+                'Unable to acquire GPS position. Please check your location settings.')),
+      );
+    }
+  }
+
+  bool _isNearStartPosition(Position currentPosition) {
+    if (startPosition == null) return false;
+
+    final distanceToStart = Geolocator.distanceBetween(
+      startPosition!.latitude,
+      startPosition!.longitude,
+      currentPosition.latitude,
+      currentPosition.longitude,
+    );
+
+    return distanceToStart < 20; // Within 20 meters of start
+  }
+
+  void pauseRun() {
+    setState(() {
+      isPaused = !isPaused;
+    });
+  }
+
+  void stopRun() {
+    timer?.cancel();
+    positionStream?.cancel();
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => RunSummaryScreen(
+          distance: distance,
+          duration: elapsed,
+          routePoints: routePoints,
+          useMetric: useMetric,
+        ),
+      ),
+    ).then((_) {
+      setState(() {
+        isRunning = false;
+        isPaused = false;
+        distance = 0;
+        elapsed = Duration.zero;
+        routePoints = [];
+        startPosition = null;
+      });
     });
   }
 
   @override
+  void dispose() {
+    timer?.cancel();
+    positionStream?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text('Run Tracker'),
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text(
-              'You have pushed the button this many times:',
+      body: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          SwitchListTile(
+            title: const Text('Auto-stop when returning to start'),
+            value: autoStopEnabled,
+            onChanged: (bool value) {
+              setState(() {
+                autoStopEnabled = value;
+                _savePreferences();
+              });
+            },
+          ),
+          SwitchListTile(
+            title: Text('Use ${useMetric ? "Kilometers" : "Miles"}'),
+            value: useMetric,
+            onChanged: (bool value) {
+              setState(() {
+                useMetric = value;
+                _saveUnitPreference();
+              });
+            },
+          ),
+          const SizedBox(height: 20),
+          Text(
+            'Time: ${elapsed.inMinutes}:${(elapsed.inSeconds % 60).toString().padLeft(2, '0')}',
+            style: Theme.of(context).textTheme.headlineMedium,
+          ),
+          Text(
+            'Distance: ${formatDistance(distance)}',
+            style: Theme.of(context).textTheme.headlineMedium,
+          ),
+          const SizedBox(height: 20),
+          if (!isRunning)
+            ElevatedButton(
+              onPressed: startRun,
+              style: ElevatedButton.styleFrom(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+              ),
+              child: const Text('Start Run'),
+            )
+          else
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                ElevatedButton(
+                  onPressed: pauseRun,
+                  child: Text(isPaused ? 'Resume' : 'Pause'),
+                ),
+                const SizedBox(width: 20),
+                ElevatedButton(
+                  onPressed: stopRun,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red,
+                    foregroundColor: Colors.white,
+                  ),
+                  child: const Text('Stop'),
+                ),
+              ],
             ),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+        ],
+      ),
+    );
+  }
+}
+
+class RunSummaryScreen extends StatelessWidget {
+  final double distance;
+  final Duration duration;
+  final List<LatLng> routePoints;
+  final bool useMetric;
+  static const double kmToMilesConversion = 0.621371;
+
+  const RunSummaryScreen({
+    super.key,
+    required this.distance,
+    required this.duration,
+    required this.routePoints,
+    required this.useMetric,
+  });
+
+  String formatDistance(double distanceInMeters) {
+    final distanceInKm = distanceInMeters / 1000;
+    if (useMetric) {
+      return '${distanceInKm.toStringAsFixed(2)} km';
+    } else {
+      final distanceInMiles = distanceInKm * kmToMilesConversion;
+      return '${distanceInMiles.toStringAsFixed(2)} mi';
+    }
+  }
+
+  String formatPace(double distanceInMeters) {
+    if (distanceInMeters == 0) return '--:-- /km';
+
+    final distanceInKm = distanceInMeters / 1000;
+    final seconds = duration.inSeconds;
+
+    if (useMetric) {
+      final pacePerKm = seconds / distanceInKm;
+      return '${(pacePerKm / 60).floor()}:${((pacePerKm % 60).round()).toString().padLeft(2, '0')} /km';
+    } else {
+      final distanceInMiles = distanceInKm * kmToMilesConversion;
+      final pacePerMile = seconds / distanceInMiles;
+      return '${(pacePerMile / 60).floor()}:${((pacePerMile % 60).round()).toString().padLeft(2, '0')} /mi';
+    }
+  }
+
+  // In RunSummaryScreen class, update the build method:
+  @override
+  Widget build(BuildContext context) {
+    final pace = duration.inSeconds / (distance / 1000); // seconds per km
+
+    return WillPopScope(
+      onWillPop: () async {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (context) => const RunTrackerHome()),
+        );
+        return false;
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Run Summary'),
+          automaticallyImplyLeading: false,
+        ),
+        body: Column(
+          children: [
+            Expanded(
+              child: GoogleMap(
+                initialCameraPosition: CameraPosition(
+                  target: routePoints.first,
+                  zoom: 15,
+                ),
+                polylines: {
+                  Polyline(
+                    polylineId: const PolylineId('route'),
+                    points: routePoints,
+                    color: Colors.blue,
+                    width: 5,
+                  ),
+                },
+                markers: {
+                  Marker(
+                    markerId: const MarkerId('start'),
+                    position: routePoints.first,
+                    icon: BitmapDescriptor.defaultMarkerWithHue(
+                      BitmapDescriptor.hueGreen,
+                    ),
+                  ),
+                  Marker(
+                    markerId: const MarkerId('end'),
+                    position: routePoints.last,
+                    icon: BitmapDescriptor.defaultMarkerWithHue(
+                      BitmapDescriptor.hueRed,
+                    ),
+                  ),
+                },
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  Text(
+                    'Distance: ${(distance / 1000).toStringAsFixed(2)} km',
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
+                  Text(
+                    'Time: ${duration.inMinutes}:${(duration.inSeconds % 60).toString().padLeft(2, '0')}',
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
+                  Text(
+                    'Pace: ${(pace / 60).floor()}:${((pace % 60).round()).toString().padLeft(2, '0')} /km',
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
+                  const SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: () {
+                      Navigator.pushReplacement(
+                        context,
+                        MaterialPageRoute(
+                            builder: (context) => const RunTrackerHome()),
+                      );
+                    },
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 32, vertical: 16),
+                    ),
+                    child: const Text('Start New Run'),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
   }
 }
