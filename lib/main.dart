@@ -244,7 +244,7 @@ class _RunTrackerHomeState extends State<RunTrackerHome> {
             },
           ),
           SwitchListTile(
-            title: Text('Use ${useMetric ? "Kilometers" : "Miles"}'),
+            title: Text('Use ${useMetric ? "Miles" : "Kilometers"}'),
             value: useMetric,
             onChanged: (bool value) {
               setState(() {
@@ -341,7 +341,13 @@ class RunSummaryScreen extends StatelessWidget {
   // In RunSummaryScreen class, update the build method:
   @override
   Widget build(BuildContext context) {
-    final pace = duration.inSeconds / (distance / 1000); // seconds per km
+    final pace = distance > 0
+        ? duration.inSeconds / (distance / 1000)
+        : 0; // seconds per km
+
+    // Add a default position for when no route exists
+    final defaultPosition = const LatLng(0, 0);
+    final hasRoute = routePoints.isNotEmpty;
 
     return WillPopScope(
       onWillPop: () async {
@@ -361,33 +367,37 @@ class RunSummaryScreen extends StatelessWidget {
             Expanded(
               child: GoogleMap(
                 initialCameraPosition: CameraPosition(
-                  target: routePoints.first,
+                  target: hasRoute ? routePoints.first : defaultPosition,
                   zoom: 15,
                 ),
-                polylines: {
-                  Polyline(
-                    polylineId: const PolylineId('route'),
-                    points: routePoints,
-                    color: Colors.blue,
-                    width: 5,
-                  ),
-                },
-                markers: {
-                  Marker(
-                    markerId: const MarkerId('start'),
-                    position: routePoints.first,
-                    icon: BitmapDescriptor.defaultMarkerWithHue(
-                      BitmapDescriptor.hueGreen,
-                    ),
-                  ),
-                  Marker(
-                    markerId: const MarkerId('end'),
-                    position: routePoints.last,
-                    icon: BitmapDescriptor.defaultMarkerWithHue(
-                      BitmapDescriptor.hueRed,
-                    ),
-                  ),
-                },
+                polylines: hasRoute
+                    ? {
+                        Polyline(
+                          polylineId: const PolylineId('route'),
+                          points: routePoints,
+                          color: Colors.blue,
+                          width: 5,
+                        ),
+                      }
+                    : {},
+                markers: hasRoute
+                    ? {
+                        Marker(
+                          markerId: const MarkerId('start'),
+                          position: routePoints.first,
+                          icon: BitmapDescriptor.defaultMarkerWithHue(
+                            BitmapDescriptor.hueGreen,
+                          ),
+                        ),
+                        Marker(
+                          markerId: const MarkerId('end'),
+                          position: routePoints.last,
+                          icon: BitmapDescriptor.defaultMarkerWithHue(
+                            BitmapDescriptor.hueRed,
+                          ),
+                        ),
+                      }
+                    : {},
               ),
             ),
             Padding(
@@ -403,7 +413,7 @@ class RunSummaryScreen extends StatelessWidget {
                     style: Theme.of(context).textTheme.headlineSmall,
                   ),
                   Text(
-                    'Pace: ${(pace / 60).floor()}:${((pace % 60).round()).toString().padLeft(2, '0')} /km',
+                    'Pace: ${distance > 0 ? "${(pace / 60).floor()}:${((pace % 60).round()).toString().padLeft(2, '0')} /km" : "--:-- /km"}',
                     style: Theme.of(context).textTheme.headlineSmall,
                   ),
                   const SizedBox(height: 20),
